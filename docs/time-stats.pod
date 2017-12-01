@@ -1,0 +1,453 @@
+=encoding UTF-8
+
+=head1 NAME
+
+time-stats - Aggregate B<time>(1) output using statistics
+
+=head1 SYNOPSIS
+
+B<time-stats> [I<OPTION>]... [I<FILE>]...
+
+=head1 DESCRIPTION
+
+Aggregate GNU time (or similar) output across multiple runs and display a
+statistical overview of the values.
+
+=head2 Bash Redirection
+
+The bash built-in command must be part of a construct in order to redirect the
+C<time> output.  For example, while C<< time true 2>&1 | time-stats >> will not
+work, the following commands will:
+
+	$ { time true; } 2>&1 | time-stats
+	$ ( time true ) 2>&1 | time-stats
+	$ for i in 1; do time true; done 2>&1 | time-stats
+	$ until time true; do echo; done 2>&1 | time-stats
+
+=head1 OPTIONS
+
+=head2 Generic Program Information
+
+=over
+
+=item C<--help>, C<-?>
+
+Output a usage message and exit.
+
+=item C<--version>
+
+Output version information and exit.
+
+=back
+
+=head2 Information Selection
+
+=over
+
+=item C<< --fields=<fields> >>
+
+A comma separated list of fields to display, when applicable.
+
+If a field is excluded by another selection option (see C<--const> and
+C<--no-partial>), the field is omitted from the output.  When this option is
+given, the eligible fields are displayed in the order given, with one field per
+line.
+
+If this option is not given, all of the available (and eligible) fields are
+displayed.
+
+See L</FIELDS> for the list of available fields.
+
+=item C<< --stats=<stats> >>
+
+A comma-separated list of statistical values to display, when applicable.
+
+If a stat is not valid for a particular field, it is omitted I<for that field>.
+The valid stats are displayed in the order given.  In the default mode, the
+stats are separated by tabs and prefixed with C<$symbol=>, where C<$symbol>
+indicates the stat.  If C<--table> is given, an ASCII table will be created
+instead.  If the value is valid for a particular field, but undefined, it will
+be displayed as "ω" (by default) or "d.n.e." (with C<--table>).
+
+If this option is not given, the median, mean, & standard deviation are shown.
+
+See L</STATS> for the list of available statistics.
+
+=item C<< --const >>
+
+Show fields with constant values.
+
+By default, if all of the values for a field are identical (e.g. the machine
+page size), the field is omitted from the output.  This option disables that
+behavior.
+
+=item C<< --no-partial >>
+
+Hide fields that are missing values.
+
+If a field is unavailable in at least one of the parsed B<time>(1) outputs
+then, by default, the field is suffixed with the count of entries for that
+field (using C<n=> in the default layout and adding a C<count> column with
+C<--table>).
+
+This option will, instead, omit the field from the output.  Thus, when this
+option is given, the extra C<n=> or C<count> column will never appear.
+
+=back
+
+=head2 Parsing time format
+
+=over
+
+=item C<< --format=<format> >>
+
+Additional B<time>(1) outputs to recognize and parse.  Can be specified more
+than once.
+
+See the GNU time documentation for the format string syntax.  Use the same
+format string as was used to create the time output in the first place.  To
+avoid parsing errors, formats should have non-numeric values between the
+outputs.  For example, C<%e%U%S> would have parsing issues, but C<%e,%U,%S>
+would not.
+
+=item C<--no-recognize-standard-formats>
+
+Don't recognize B<time>(1) output from the built-in Bash command, along with
+the pre-defined formats of GNU time (i.e. the default, `-p`, & `-v` formats).
+Only the formats specified in the given C<--format> option(s) will be detected.
+
+=back
+
+=head2 Presentation format
+
+=over
+
+=item C<< --table >>
+
+Present the statistics in a table, without using short hands notation.  This
+format is designed to be more human-readable, with field descriptions instead
+of short names.
+
+Undefined values are presented as "d.n.e.", while invalid statistics are left
+empty in the table (e.g. there is no median for "cmd"; it's not a number).
+
+=item C<< --dump-entries >>
+
+Dump all the data collected instead of aggregating it.  This is for debugging
+the C<--format> option and is otherwise pretty useless.
+
+=back
+
+=head1 FIELDS
+
+The field descriptions mostly come from the GNU time(1) man page.  However, the
+field names themselves are unique to this command.
+
+=head2 Time
+
+=over
+
+=item real (C<%e>, C<%E>)
+
+B<Ratio.> Elapsed real time (in seconds).
+
+=item sys (C<%S>)
+
+B<Ratio.> Total number of CPU-seconds that the process spent in kernel mode.
+
+=item user (C<%U>)
+
+B<Ratio.> Total number of CPU-seconds that the process spent in user mode.
+
+=item cpu (C<%P>)
+
+Percentage of the CPU that this job got.
+
+=back
+
+=head2 Memory
+
+=over
+
+=item max_rss (C<%M>)
+
+B<Ratio.> Maximum resident set size of the process during its lifetime, in
+Kbytes.
+
+=item rss (C<%t>)
+
+B<Ratio.> Average resident set size of the process, in Kbytes.
+
+=item total (C<%K>)
+
+B<Ratio.> Average total (data+stack+text) memory use of the process, in Kbytes.
+
+=item data (C<%D>)
+
+B<Ratio.> Average size of the process's unshared data area, in Kbytes.
+
+=item stack (C<%p>)
+
+B<Ratio.> Average size of the process's unshared stack space, in Kbytes.
+
+=item text (C<%X>)
+
+B<Ratio.> Average size of the process's shared text space, in Kbytes.
+
+=item page (C<%Z>)
+
+B<Ratio.> System's page size, in bytes.  This is a per-system constant, but
+varies between systems.
+
+=item major (C<%F>)
+
+B<Interval.> Number of major page faults that occurred while the process was
+running.  These are faults where the page has to be read in from disk.
+
+=item minor (C<%R>)
+
+B<Interval.> Number of minor, or recoverable, page faults.  These are faults
+for pages that are not valid but which have not yet been claimed by other
+virtual pages.  Thus the data in the page is still valid but the system
+tables must be updated.
+
+=item swap (C<%W>)
+
+B<Interval.> Number of times the process was swapped out of main memory.
+
+=item switch (C<%c>)
+
+B<Interval.> Number of times the process was context-switched involuntarily
+(e.g. because the time slice expired).
+
+=item wait (C<%w>)
+
+B<Interval.> Number of waits: times that the program was context-switched
+voluntarily, for instance while waiting for an I/O operation to complete.
+
+=back
+
+=head2 I/O
+
+=over
+
+=item in (C<%I>)
+
+B<Interval.> Number of filesystem inputs by the process.
+
+=item out (C<%O>)
+
+B<Interval.> Number of filesystem outputs by the process.
+
+=item recv (C<%r>)
+
+B<Interval.> Number of socket messages received by the process.
+
+=item send (C<%s>)
+
+B<Interval.> Number of socket messages sent by the process.
+
+=item sig (C<%k>)
+
+B<Interval.> Number of signals delivered to the process.
+
+=item cmd (C<%C>)
+
+B<Nominal.> Name and command-line arguments of the command being timed.
+
+=item exit (C<%x>)
+
+B<Nominal.> Exit status of the command.
+
+=item kill
+
+B<Nominal.> Signal that caused the command to either stop or terminate.
+
+This value is only provided by GNU time when it occurs.  It cannot be specified
+in the C<--format> option on GNU time; thus, it does not have a format percent
+code.
+
+=back
+
+=head1 STATS
+
+Each stat for a field is shown on the field's line, separated by whitespace,
+using a short symbol (often outside of ASCII) followed by an equals sign (=)
+and the value, for a compact presentation.  Each symbol comes from a discipline
+of mathematics (not always from statistics) for improved recognition among
+statisticians.
+
+When C<--table> is given, an ASCII table is used instead.  Longer, more human
+friendly labels are also used instead of the C<$symbol=> format.
+
+=head2 Nominal
+
+Nominal fields are composed of simple labels; they are not comparable.  The
+labels may be numbers but, in context, these numbers do not form a simply
+ordered set.
+
+For example, is C<SIGKILL> greater than C<SIGCHLD>?  The question cannot be
+answered as the signals handle 2 different things entirely.  Replace the names
+with numbers and they still can't be compared.
+
+The following stats are available for nominal fields:
+
+=over
+
+=item count (C<n>)
+
+The number of items being considered.  This value is shown on the first line
+and represents the total number of matches found.  If a field doesn't appear in
+every match, then the count of how often I<that> field exists is shown in
+parenthesis at the end of the line.
+
+In table format, the count column automatically appears if any of the fields
+has fewer than the total number specified at the top of the table.  In that
+case, each field is populated with its count.
+
+=item mode (C<Mo>)
+
+The item that appears most often, if one exists.  If a tie occurs, the mode is
+undefined (C<ω> or C<d.n.e.>).
+
+=back
+
+=head2 Real Values
+
+The fields that are not nominal contain integer or real numbers (ones that
+aren't substitutes for labels).
+
+These fields can use all of the stats from L<Nominal> plus all the following:
+
+=head3 Ordinal
+
+=over
+
+=item max (C<⊤>)
+
+The maximum value for a field.
+
+C<⊤> comes from abstract algebra and is often used to represent the top (or
+largest) element of a lattice.
+
+=item min (C<⊥>)
+
+The minimum value for a field.
+
+C<⊥> comes from abstract algebra and is often used to represent the bottom (or
+smallest) element of a lattice.
+
+=item maxdex (C<⊤ₓ>)
+
+The 0-based index of the maximum value for a field.
+
+The C<ₓ> subscript is often used to indicate we want the index.
+
+=item mindex (C<⊥ₓ>)
+
+The 0-based index of the minimum value for a field.
+
+The C<ₓ> subscript is often used to indicate we want the index.
+
+=item median (C<x͂>)
+
+The "middle" value for a field.  This is sometimes more useful than the mean
+(average), as it's not as easily skewed by extreme outliers and may provide a
+more "typical" value.
+
+C<x͂> is commonly used in statistics for median.
+
+=back
+
+=head3 Interval
+
+=over
+
+=item sum (C<Σ>)
+
+The total of all values for a field added together.
+
+C<Σ> comes from the n-ary summation operator.
+
+=item mean (C<μ>)
+
+The arithmetic average of all values for a field.
+
+C<μ> and C<x̅> are commonly used in statistics for mean; the former is more
+visually distinct from the symbol used for median.
+
+=item variance (C<σ²>)
+
+The amount of variation, or dispersion, for a field.
+
+C<σ²> is commonly used in statistics for variance.
+
+B<Note:> The units for variance are squared; however, units are not shown in
+the display, so this may not be obvious.
+
+=item standard_deviation (C<σ>)
+
+The amount of variation, or dispersion, for a field.  This uses the same units
+as the mean.
+
+C<σ> is commonly used in statistics for standard deviation.
+
+=back
+
+=head3 Ratio
+
+=over
+
+=item geometric_mean (C<G>)
+
+...
+
+C<G> is commonly used in statistics for geometric means.
+
+=item harmonic_mean (C<H>)
+
+...
+
+C<H> is commonly used in statistics for harmonic means.
+
+=item skewness (C<γ₁>)
+
+...
+
+C<γ₁> is commonly used in statistics for skewness.
+
+=item kertosis (C<κ>)
+
+...
+
+C<κ> is commonly used in statistics for kertosis.
+
+=back
+
+=head1 REPORTING BUGS
+
+Report found issues at https://github.com/ColMelvin/time-stats/issues.
+
+=head1 COPYRIGHT
+
+Copyright (C) 2017-2018  Chris Lindee
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along
+with this program; if not, write to the Free Software Foundation, Inc.,
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+=head1 SEE ALSO
+
+B<time>(1)
+
+=cut

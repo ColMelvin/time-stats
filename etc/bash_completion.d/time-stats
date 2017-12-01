@@ -1,0 +1,68 @@
+# bash source
+
+case "$COMP_WORDBREAKS" in
+	*:*) ;;
+	*)   COMP_WORDBREAKS="$COMP_WORDBREAKS:"
+esac
+
+case "$COMP_WORDBREAKS" in
+	*,*) ;;
+	*)   COMP_WORDBREAKS="$COMP_WORDBREAKS,"
+esac
+
+function __time_stats() {
+	local cur="${COMP_WORDS[COMP_CWORD]}"
+	local index=$((COMP_CWORD-1))
+
+	COMPREPLY=()
+	case "$cur" in
+		-*)
+			__arg_list --help --version --format= --no-recognize-standard-formats --recognize-standard-formats
+			__arg_list --fields= --stats= --no-const --const --no-partial --partial --no-table --table --no-dump-entries --dump-entries
+			return ;;
+		,) cur= ; ((index--)) ;;
+		=) cur= ;;
+	esac
+
+	while [ "${COMP_WORDS[index]}" = "," -a "$index" -gt 2 ]
+	do
+		((index-=2))
+	done
+	[ "${COMP_WORDS[index]}" = "=" ] && ((index--))
+	local switch="${COMP_WORDS[index]}"
+
+	if [ "$switch" = "--fields" ]; then
+		__comma_list real user sys cpu max_rss rss total data stack text page major minor swap switch wait in out recv send sig cmd kill exit
+	elif [ "$switch" = "--stats" ]; then
+		__comma_list mode median max min maxdex mindex sum mean standard_deviation variance geometric_mean harmonic_mean skewness kertosis
+
+	fi
+}
+
+function __arg_list() {
+	local arg i=${#COMPREPLY[@]}
+	for arg in $*
+	do
+		if [[ "$arg" == "$cur"* ]]; then
+			if [ "${arg: -1}" = "=" ]; then
+				COMPREPLY[i++]="$arg"
+			else
+				COMPREPLY[i++]="$arg "
+			fi
+		fi
+	done
+}
+
+function __comma_list() {
+	local arg i=${#COMPREPLY[@]}
+	for arg in $*
+	do
+		if [ "$arg" = "$cur" ]; then
+			COMPREPLY[i++]="$arg,"
+		elif [[ "$arg" == "$cur"* ]]; then
+			COMPREPLY[i++]="$arg"
+		fi
+	done
+}
+
+complete -F __time_stats -o default -o nospace time-stats
