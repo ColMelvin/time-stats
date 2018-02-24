@@ -1,0 +1,489 @@
+#!/usr/bin/perl
+
+package time_stats;
+
+use strict;
+use warnings;
+use utf8;
+
+use constant {
+	NOMINAL => 0,
+	ORDINAL => 1,
+	INTERVAL => 2,
+	RATIO => 3,
+};
+
+use Getopt::Long ();
+use Statistics::Descriptive ();
+
+our $VERSION = 0.000_001;
+
+my %field_info = build_field_info();
+my @field_order = (qw(
+	real user sys cpu
+	max_rss rss total data stack text page
+	major minor swap switch wait
+	in out recv send sig
+	exit kill cmd
+));
+my %stat_info = (
+	mode => { scale => &NOMINAL, symbol => 'Mo' },
+	max => { scale => &ORDINAL, symbol => '⊤' },
+	min => { scale => &ORDINAL, symbol => '⊥' },
+	maxdex => { scale => &ORDINAL, symbol => '⊤ₓ' },
+	mindex => { scale => &ORDINAL, symbol => '⊥ₓ' },
+	median => { scale => &ORDINAL, symbol => 'x͂' },
+	mean => { scale => &INTERVAL, symbol => 'μ' },
+	sum => { scale => &INTERVAL, symbol => 'Σ' },
+	variance => { scale => &INTERVAL, symbol => 'σ²' },
+	standard_deviation => { scale => &INTERVAL, symbol => 'σ' },
+	geometric_mean => { scale => &RATIO, symbol => 'G' },
+	harmonic_mean => { scale => &RATIO, symbol => 'H' },
+	skewness => { scale => &RATIO, symbol => 'γ₁' },
+	kertosis => { scale => &RATIO, symbol => 'κ' },
+);
+
+exit _main(@ARGV) unless caller;
+
+sub _main {
+	my @args = @_;
+
+	my $partial = 1;
+	my $recognize_std_formats = 1;
+	Getopt::Long::GetOptionsFromArray(
+		\@args,
+		'help|?' => \my $print_help,
+		'version' => \my $print_version,
+
+		'fields=s' => \my $data,
+		'stats=s' => \my $stat,
+		'const!' => \my $const,
+		'partial!' => \$partial,
+
+		'format=s' => \my @formats,
+		'recognize-standard-formats!' => \$recognize_std_formats,
+
+		'table!' => \my $table,
+		'dump-entries!' => \my $dump,
+	);
+
+	return show_help() if $print_help;
+	return show_version() if $print_version;
+
+	@formats = map { get_gnu_time_regex($_) } @formats;
+	push @formats, get_known_time_formats() if $recognize_std_formats;
+
+	@args = ( '-' ) if !@args;
+	my @times;
+	foreach my $file (@args) {
+		my $fh;
+		if ($file eq '-') {
+			$fh = \*STDIN;
+		}
+		else {
+			open $fh, '<', $file or die "Cannot open file “$file”: $!";
+		}
+
+		push @times, collect_times( \@formats, $file, $fh );
+	}
+
+	if ($dump) {
+		foreach my $time (@times) {
+			print "In file '$time->{file}' at char $time->{start} ($time->{length} chars long):\n";
+			printf "\t%-7s '%s'\n", $_, $time->{$_} foreach (sort grep { !m/^(?:start|length|file)$/ } keys %$time);
+		}
+		return 0;
+	}
+
+	my @fields = $data ? split m/,/, $data : @field_order;
+	my @stats = $stat ? split m/,/, $stat : ( 'median', 'mean', 'standard_deviation' );
+
+	my $stat_data_hr = build_statistics( \@times, \@fields );
+	if (!$const) {
+		@fields = grep {
+			my $f = $stat_data_hr->{$_};
+			if (!$f || $f->count() == 0) {
+				0
+			}
+			elsif ($f->isa('Statistics::Nominal')) {
+				keys %{ $f->aggregate() } > 1
+			}
+			else {
+				$f->min() != $f->max()
+			}
+		} @fields;
+	}
+	if (!$partial) {
+		@fields = grep { $stat_data_hr->{$_}->count() == $stat_data_hr->{count} } @fields;
+	}
+
+	my $display = $table ?
+		sprint_statistics_table( $stat_data_hr, \@fields, \@stats) :
+		sprint_statistics( $stat_data_hr, \@fields, \@stats);
+	binmode \*STDOUT, ":utf8";
+	print $display;
+
+	return 0;
+}
+
+sub get_known_time_formats {
+	my $bash_time = qr/
+		^\n
+		real\t(?<real>\d+m\d+\.\d+s)\n
+		user\t(?<user>\d+m\d+\.\d+s)\n
+		sys\t(?<sys>\d+m\d+\.\d+s)\n
+	/xm;
+	my $gnu_time_portable = get_gnu_time_regex(<<EOF);
+real %e
+user %U
+sys %S
+EOF
+	my $gnu_time_doc_default = get_gnu_time_regex(<<EOF);
+%Uuser %Ssystem %Eelapsed %PCPU (%Xtext+%Ddata %Mmax)k
+%Iinputs+%Ooutputs (%Fmajor+%Rminor)pagefaults %Wswaps
+EOF
+	my $gnu_time_default = get_gnu_time_regex(<<EOF);
+%Uuser %Ssystem %Eelapsed %PCPU (%Xavgtext+%Davgdata %Mmaxresident)k
+%Iinputs+%Ooutputs (%Fmajor+%Rminor)pagefaults %Wswaps
+EOF
+
+	my @exits = (
+		qr/Command stopped by signal (?<kill>\d+)\n/,
+		qr/Command terminated by signal (?<kill>\d+)\n/,
+		qr/Command exited with non-zero status (?<exit>\d+)\n/,
+	);
+	my $gnu_time_verbose = "(?:" . join('|', @exits) . ')?' . get_gnu_time_regex(<<EOF);
+\tCommand being timed: "%C"
+\tUser time (seconds): %U
+\tSystem time (seconds): %S
+\tPercent of CPU this job got: %P
+\tElapsed (wall clock) time (h:mm:ss or m:ss): %E
+\tAverage shared text size (kbytes): %X
+\tAverage unshared data size (kbytes): %D
+\tAverage stack size (kbytes): %p
+\tAverage total size (kbytes): %K
+\tMaximum resident set size (kbytes): %M
+\tAverage resident set size (kbytes): %t
+\tMajor (requiring I/O) page faults: %F
+\tMinor (reclaiming a frame) page faults: %R
+\tVoluntary context switches: %w
+\tInvoluntary context switches: %c
+\tSwaps: %W
+\tFile system inputs: %I
+\tFile system outputs: %O
+\tSocket messages sent: %s
+\tSocket messages received: %r
+\tSignals delivered: %k
+\tPage size (bytes): %Z
+\tExit status: %x
+EOF
+
+	return $bash_time, $gnu_time_portable, $gnu_time_doc_default, $gnu_time_default, $gnu_time_verbose;
+}
+
+sub get_gnu_time_regex {
+	my ($str) = @_;
+
+	# Only \n, \t, & \\ are recognized by GNU time.
+	$str =~ s/(\\[nt\\])/"qq[$1]"/gee;
+	$str = quotemeta $str;
+
+	my %sub = (
+		'E' => qr/(?<real>(?:\d+:)?\d+:\d+\.\d+)/,
+		'e' => qr/(?<real>\d+\.\d+)/,
+		'S' => qr/(?<sys>\d+\.\d+)/,
+		'U' => qr/(?<user>\d+\.\d+)/,
+		'P' => qr/(?<cpu>\d+(?:\.\d+)?)%/,
+
+		'M' => qr/(?<max_rss>\d+)/,
+		't' => qr/(?<rss>\d+)/,
+		'K' => qr/(?<total>\d+)/,
+		'D' => qr/(?<data>\d+)/,
+		'p' => qr/(?<stack>\d+)/,
+		'X' => qr/(?<text>\d+)/,
+		'Z' => qr/(?<page>\d+)/,
+		'F' => qr/(?<major>\d+)/,
+		'R' => qr/(?<minor>\d+)/,
+		'W' => qr/(?<swap>\d+)/,
+		'c' => qr/(?<switch>\d+)/,
+		'w' => qr/(?<wait>\d+)/,
+
+		'I' => qr/(?<in>\d+)/,
+		'O' => qr/(?<out>\d+)/,
+		'r' => qr/(?<recv>\d+)/,
+		's' => qr/(?<send>\d+)/,
+		'k' => qr/(?<sig>\d+)/,
+		'C' => qr/(?<cmd>.*)/,
+		'x' => qr/(?<exit>\d+)/,
+
+		'\%' => '\%',
+	);
+
+	$str =~ s{\\%(\w|\\.)}{$sub{$1} || "\\?$1"}eg;
+
+	return $str;
+}
+
+sub collect_times {
+	my ( $formats_ar, $filename, $fh ) = @_;
+
+	local $/;
+	my $data = <$fh>;
+
+	my $regex = join '|', map { "(?:$_)" } @$formats_ar;
+	my @output;
+	while ($data =~ m/($regex)/g) {
+		my $length = length $1;
+		my %values = ( %+, file => $filename, start => pos($data) - $length, length => $length );
+		$values{real} = convert_time_to_seconds($values{real}) if exists $values{real};
+		$values{user} = convert_time_to_seconds($values{user}) if exists $values{user};
+		$values{sys} = convert_time_to_seconds($values{sys}) if exists $values{sys};
+		push @output, \%values;
+	}
+
+	return @output;
+}
+
+sub convert_time_to_seconds {
+	my ($time) = @_;
+
+	die "Cannot parse time: $time" unless $time =~ m/
+		^(?:(?<hr>\d+)h)? (?:(?<min>\d+)m)? (?<sec>\d+\.\d+)s$ |
+		^(?: (?:(?<hr>\d+):)? (?<min>\d+):)? (?<sec>\d+\.\d+)$ |
+		^(?<sec>\d+\.\d+)$
+	/x;
+
+	return ( $+{hr} || 0 ) * 3600 + ( $+{min} || 0 ) * 60 + $+{sec};
+}
+
+sub build_statistics {
+	my ($times_ar, $fields_ar) = @_;
+
+	my %output;
+	foreach my $field (@$fields_ar) {
+		my $f_info = $field_info{$field};
+		if (!$f_info) {
+			warn "Invalid field: $field\n";
+			next;
+		}
+
+		$output{$field} = $f_info->{scale} == &NOMINAL ? Statistics::Nominal->new() : Statistics::Descriptive::Full->new();
+		$output{$field}->add_data( map { defined $_->{$field} ? $_->{$field} : () } @$times_ar );
+	}
+	$output{count} = scalar @$times_ar;
+
+	return \%output;
+}
+
+sub sprint_statistics {
+	my ( $stat_data_hr, $fields_ar, $stats_ar ) = @_;
+
+	my $output = "n=$stat_data_hr->{count}\n";
+	foreach my $field (@$fields_ar) {
+		my $f = $stat_data_hr->{$field};
+
+		$output .= $field;
+		foreach my $stat (@$stats_ar) {
+			my $s_info = $stat_info{$stat};
+			next if $s_info->{scale} > $field_info{$field}->{scale};
+
+			my $name = $s_info->{symbol} || $stat;
+			my $value = $f->$stat();
+			$value = 'ω' if !defined $value;
+			$output .= "\t$name=$value";
+		}
+		$output .= "\t(n=" . $f->count() . ")" if $stat_data_hr->{count} != $f->count();
+		$output .= "\n";
+	}
+	return $output;
+}
+
+sub sprint_statistics_table {
+	my ( $stat_data_hr, $fields_ar, $stats_ar ) = @_;
+
+	# First pass.
+	my %col_lengths = map { $_ => length $_ } 'desc', 'count', @$stats_ar;
+	my $show_counts;
+	foreach my $field (@$fields_ar) {
+		my $desc = $field_info{$field}->{desc};
+		$desc .= " ($field_info{$field}->{unit})" if defined $field_info{$field}->{unit};
+		$col_lengths{desc} = length $desc if length $desc > $col_lengths{desc};
+
+		my $f = $stat_data_hr->{$field};
+		foreach my $stat (@$stats_ar) {
+			next if $stat_info{$stat}->{scale} > $field_info{$field}->{scale};
+
+			my $value = $f->$stat();
+			$value = 'd.n.e.' if !defined $value;
+			$col_lengths{$stat} = length $value if length $value > $col_lengths{$stat};
+		}
+		$col_lengths{count} = length $f->count() if length $f->count() > $col_lengths{count};
+		$show_counts = 1 if $stat_data_hr->{count} != $f->count();
+	}
+
+	# Second pass.
+	my $output = "Total: $stat_data_hr->{count} entries\n";
+	# Headers
+	$output .= ' ' x $col_lengths{desc};
+	foreach my $stat (@$stats_ar) {
+		$output .= sprintf ' | %-*s', $col_lengths{$stat}, $stat;
+	}
+	$output .= sprintf ' | %*s', $col_lengths{count}, 'count' if $show_counts;
+	$output .= "\n";
+	# Data
+	foreach my $field (@$fields_ar) {
+		my $desc = $field_info{$field}->{desc};
+		$desc .= " ($field_info{$field}->{unit})" if defined $field_info{$field}->{unit};
+		$output .= sprintf '%-*s', $col_lengths{desc}, $desc;
+
+		my $f = $stat_data_hr->{$field};
+		foreach my $stat (@$stats_ar) {
+			my $value = '';
+			if ($stat_info{$stat}->{scale} <= $field_info{$field}->{scale}) {
+				$value = $f->$stat();
+				$value = 'd.n.e.' if !defined $value;
+			}
+
+			$output .= sprintf ' | %*s', $col_lengths{$stat}, $value;
+		}
+		$output .= sprintf ' | %*d', $col_lengths{count}, $f->count() if $show_counts;
+		$output .= "\n";
+	}
+
+	return $output;
+}
+
+sub show_version {
+	print <<EOF;
+time-stats, version $VERSION
+
+Copyright (C) 2017-2018  Chris Lindee
+License GPLv2+: GNU GPL version 2 or later <https://www.gnu.org/licenses/old-licenses/gpl-2.0.html>.
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+
+EOF
+	return 0;
+}
+
+sub show_help {
+	print <<EOF;
+Usage: $0 [OPTIONS] [FILE ...]
+Performs statistical operations on the output of time(1) in aggregate.
+
+Options:
+   --help             Show this output and exits.
+   --version          Show the version and exits.
+
+   --const            Show fields where all values are the same.
+   --no-partial       Hide fields that have a missing value.
+   --table            Show values in a human-readable table.
+   --dump-entries     Show source data; no stats (for debugging).
+
+   --fields=<fields>  Comma-separated list of fields; see list below.
+                      (Defaults to any field that is available)
+
+   --stats=<stats>    Comma-separated list of stats; see list below.
+                      (Defaults to "median,mean,standard_deviation")
+
+   --format=<format>  GNU time format to consume; see time(1) for the
+                      format specifiers.  Can be given multiple times.
+
+   --no-recognize-standard-formats
+                      Disable recognition of standard time formats, such
+                      as the bash built-in and GNU time's default, -p, &
+                      -v formats.
+
+Fields:
+   real, user, sys, cpu, max_rss, rss, total, data, stack, text, page, major,
+   minor, swap, switch, wait, in, out, recv, send, sig, cmd, kill, exit
+
+Stats:
+   mode (Mo); median (x͂), max (⊤), min (⊥), maxdex(⊤ₓ), mindex(⊥ₓ); sum (Σ),
+   mean (μ), standard_deviation (σ), variance (σ²); geometric_mean (G),
+   harmonic_mean (H), skewness (γ₁), kertosis (κ)
+
+If a statistic isn't valid for particular field, it is omitted.  If a field is
+not available for all time outputs, the total number for that field is included
+in parenthesis (n).  If a stat is available, but its value is undefined, the
+value will be displayed as "ω" ("d.n.e." with --table).
+
+Use a single dash, '-', to read from standard input.  If no files are given,
+the script reads from standard input.
+EOF
+	return 0;
+}
+
+sub build_field_info {
+	my %seconds = ( scale => &RATIO, unit => 's' );
+	my %KiBs = ( scale => &RATIO, unit => 'KiB' );
+	my %count = ( scale => &RATIO );
+
+	return (
+		real => { %seconds, desc => 'Elapsed (wall clock) time' },
+		user => { %seconds, desc => 'User time' },
+		sys => { %seconds, desc => 'System time' },
+		cpu => { scale => &RATIO, desc => 'Percent of CPU' },
+
+		max_rss => { %KiBs, desc => 'Maximum resident set size' },
+		rss => { %KiBs, desc => 'Average resident set size' },
+		total => { %KiBs, desc => 'Average total size' },
+		data => { %KiBs, desc => 'Average unshared data size' },
+		stack => { %KiBs, desc => 'Average stack size' },
+		text => { %KiBs, desc => 'Average shared text size' },
+		page => { %KiBs, desc => 'Machine page size' },
+		major => { %count, desc => 'Major (requiring I/O) page faults' },
+		minor => { %count, desc => 'Minor (reclaiming a frame) page faults' },
+		swap => { %count, desc => 'Swaps' },
+		switch => { %count, desc => 'Voluntary context switches' },
+		wait => { %count, desc => 'Involuntary context switches' },
+
+		in => { %count, desc => 'File system inputs' },
+		out => { %count, desc => 'File system outputs' },
+		recv => { %count, desc => 'Socket messages received' },
+		send => { %count, desc => 'Socket messages sent' },
+		sig => { %count, desc => 'Signals delivered' },
+
+		exit => { scale => &NOMINAL, desc => 'Exit status' },
+		kill => { scale => &NOMINAL, desc => 'Ended by signal' },
+		cmd => { scale => &NOMINAL, desc => 'Command' },
+	);
+}
+
+package Statistics::Nominal;
+# This package lets us include strings in our data.
+
+sub new {
+	my ($class) = @_;
+	return bless { aggregate => {}, count => 0, mode_count => 0 }, $class;
+}
+
+sub add_data {
+	my ($self, @values) = @_;
+
+	foreach (@values) {
+		my $num = ++$self->{aggregate}{$_};
+		if ($num > $self->{mode_count}) {
+			$self->{mode_count} = $num;
+			$self->{mode} = $_;
+		}
+		elsif ($num == $self->{mode_count}) {
+			$self->{mode} = undef;
+		}
+	}
+	$self->{count} += @values;
+
+	return;
+}
+
+sub count {
+	return $_[0]->{count};
+}
+
+sub mode {
+	return $_[0]->{mode};
+}
+
+sub aggregate {
+	return $_[0]->{aggregate};
+}
