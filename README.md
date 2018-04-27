@@ -39,6 +39,11 @@ Get the worst value from all runs:
 time-stats *.log --fields=real,max_rss --stats=max
 ```
 
+## See Also
+
+* [st](https://github.com/nferraz/st): simple statistics (for any set of
+  plain numbers) from the command line
+
 ## License and Copyright
 
 Copyright (C) 2017-2018  Chris Lindee
